@@ -1,5 +1,5 @@
 {
-    "name": "laravel/remote-http-database",
+    "name": "webmavens/laravel-remote-http-database",
     "description": "Laravel database adapter for remote MySQL via HTTP API with encryption",
     "keywords": ["laravel", "database", "mysql", "remote", "http", "encryption"],
     "license": "MIT",

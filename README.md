@@ -4,7 +4,7 @@ A Laravel package that provides a custom database adapter for communicating with
 
 ## Quick Start
 
-1. **Install on both servers**: `composer require laravel/remote-http-database`
+1. **Install on both servers**: `composer require webmavens/laravel-remote-http-database`
 2. **Generate keys** (run once, use on both servers):
    ```bash
    php -r "echo 'API_KEY=' . bin2hex(random_bytes(32)) . PHP_EOL;"
@@ -51,7 +51,7 @@ Server 2 (No MySQL)                    Server 1 (Has MySQL)
 Install the package on both servers via Composer:
 
 ```bash
-composer require laravel/remote-http-database
+composer require webmavens/laravel-remote-http-database
 ```
 
 The service provider will be auto-discovered by Laravel, so no manual registration is needed.
