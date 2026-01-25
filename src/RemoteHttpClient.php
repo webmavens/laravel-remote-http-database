@@ -70,8 +70,6 @@ class RemoteHttpClient
      *
      * @param  string  $endpoint
      * @param  string  $apiKey
-     * @param  \Laravel\RemoteHttpDatabase\RemoteHttpEncryption  $encryption
-     * @param  array  $options
      * @return void
      */
     public function __construct($endpoint, $apiKey, RemoteHttpEncryption $encryption, array $options = [])
@@ -92,14 +90,14 @@ class RemoteHttpClient
     /**
      * Send a query request to the remote endpoint.
      *
+     * @param  string  $connectionName
      * @param  string  $query
-     * @param  array  $bindings
      * @param  string  $type
      * @return array
      *
      * @throws \Illuminate\Database\QueryException
      */
-    public function sendQuery($query, array $bindings = [], $type = 'select')
+    public function sendQuery($connectionName, $query, array $bindings = [], $type = 'select')
     {
         $payload = [
             'query' => $query,
@@ -131,22 +129,43 @@ class RemoteHttpClient
                 $responseData = json_decode($response->getBody()->getContents(), true);
 
                 if (! isset($responseData['data'])) {
+                    // Check if this is an unencrypted error response from the endpoint
+                    if (isset($responseData['error'])) {
+                        throw new QueryException(
+                            $connectionName,
+                            $query,
+                            $bindings,
+                            new \Exception($responseData['error'], isset($responseData['code']) ? (int) $responseData['code'] : 0)
+                        );
+                    }
                     throw new RuntimeException('Invalid response format from remote endpoint.');
                 }
 
-                $decrypted = $this->encryption->decrypt($responseData['data']);
+                try {
+                    $decrypted = $this->encryption->decrypt($responseData['data']);
+                } catch (RuntimeException $e) {
+                    // If decryption fails, it's a real encryption/decryption error
+                    throw new RuntimeException('Decryption failed: '.$e->getMessage(), 0, $e);
+                }
+
+                // Validate decrypted data structure
+                if (! is_array($decrypted)) {
+                    throw new RuntimeException('Invalid decrypted response format.');
+                }
 
                 // Store session ID if provided
                 if (isset($decrypted['session_id'])) {
                     $this->sessionId = $decrypted['session_id'];
                 }
 
-                // Handle errors
+                // Handle errors from the remote database
                 if (isset($decrypted['success']) && $decrypted['success'] === false) {
+                    $errorCode = isset($decrypted['code']) ? (int) $decrypted['code'] : 0;
                     throw new QueryException(
+                        $connectionName,
                         $query,
                         $bindings,
-                        new \Exception($decrypted['error'] ?? 'Unknown error', $decrypted['code'] ?? 0)
+                        new \Exception($decrypted['error'] ?? 'Unknown error', $errorCode)
                     );
                 }
 
@@ -157,28 +176,46 @@ class RemoteHttpClient
                 $attempts++;
 
                 if ($attempts >= $this->retryAttempts) {
+                    $errorCode = is_int($e->getCode()) ? $e->getCode() : 0;
                     throw new QueryException(
+                        $connectionName,
                         $query,
                         $bindings,
-                        new \Exception('HTTP request failed: ' . $e->getMessage(), $e->getCode())
+                        new \Exception('HTTP request failed: '.$e->getMessage(), $errorCode)
                     );
                 }
 
                 // Wait before retry (exponential backoff)
                 usleep(100000 * $attempts); // 100ms, 200ms, 300ms
             } catch (RuntimeException $e) {
+                // Only wrap as encryption/decryption error if it's actually about encryption/decryption
+                // If it's already a QueryException or has a SQL error message, re-throw it properly
+                if (stripos($e->getMessage(), 'SQLSTATE') !== false || stripos($e->getMessage(), 'SQL') !== false) {
+                    // This is likely a SQL error that got wrapped incorrectly
+                    $errorCode = is_int($e->getCode()) ? $e->getCode() : 0;
+                    throw new QueryException(
+                        $connectionName,
+                        $query,
+                        $bindings,
+                        new \Exception($e->getMessage(), $errorCode)
+                    );
+                }
+                // Otherwise, it's a real encryption/decryption error
+                $errorCode = is_int($e->getCode()) ? $e->getCode() : 0;
                 throw new QueryException(
+                    $connectionName,
                     $query,
                     $bindings,
-                    new \Exception('Encryption/Decryption error: ' . $e->getMessage(), $e->getCode())
+                    new \Exception('Encryption/Decryption error: '.$e->getMessage(), $errorCode)
                 );
             }
         }
 
         throw new QueryException(
+            $connectionName,
             $query,
             $bindings,
-            new \Exception('Request failed after ' . $this->retryAttempts . ' attempts', 0)
+            new \Exception('Request failed after '.$this->retryAttempts.' attempts', 0)
         );
     }
 

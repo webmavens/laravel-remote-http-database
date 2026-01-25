@@ -62,7 +62,7 @@ class RemoteHttpEncryption
         }
 
         // Return base64 encoded: IV + Tag + Encrypted data
-        return base64_encode($iv . $tag . $encrypted);
+        return base64_encode($iv.$tag.$encrypted);
     }
 
     /**
@@ -99,6 +99,12 @@ class RemoteHttpEncryption
             throw new RuntimeException('Decryption failed.');
         }
 
-        return json_decode($decrypted, true);
+        $decoded = json_decode($decrypted, true);
+
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            throw new RuntimeException('Failed to decode decrypted data: '.json_last_error_msg());
+        }
+
+        return $decoded;
     }
 }

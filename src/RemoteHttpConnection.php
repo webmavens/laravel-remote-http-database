@@ -27,6 +27,13 @@ class RemoteHttpConnection extends Connection
     protected $lastInsertId;
 
     /**
+     * The detected remote database type (mysql, sqlite, etc.).
+     *
+     * @var string|null
+     */
+    protected $remoteDatabaseType = null;
+
+    /**
      * Create a new remote HTTP connection instance.
      *
      * @param  \PDO|\Closure  $pdo
@@ -132,7 +139,10 @@ class RemoteHttpConnection extends Connection
                 return [];
             }
 
-            $response = $this->httpClient->sendQuery($query, $bindings, 'select');
+            // Process query to handle database-specific syntax
+            $query = $this->processQueryForRemoteDatabase($query);
+
+            $response = $this->httpClient->sendQuery($this->getName(), $query, $bindings, 'select');
 
             // Convert results to objects if needed
             $results = $response['results'] ?? [];
@@ -180,7 +190,7 @@ class RemoteHttpConnection extends Connection
                 return true;
             }
 
-            $response = $this->httpClient->sendQuery($query, $bindings, 'insert');
+            $response = $this->httpClient->sendQuery($this->getName(), $query, $bindings, 'insert');
 
             $this->recordsHaveBeenModified();
 
@@ -207,7 +217,7 @@ class RemoteHttpConnection extends Connection
                 return true;
             }
 
-            $response = $this->httpClient->sendQuery($query, $bindings, 'statement');
+            $response = $this->httpClient->sendQuery($this->getName(), $query, $bindings, 'statement');
 
             $this->recordsHaveBeenModified();
 
@@ -229,7 +239,7 @@ class RemoteHttpConnection extends Connection
                 return 0;
             }
 
-            $response = $this->httpClient->sendQuery($query, $bindings, 'affecting');
+            $response = $this->httpClient->sendQuery($this->getName(), $query, $bindings, 'affecting');
 
             $rowsAffected = $response['rows_affected'] ?? 0;
 
@@ -252,7 +262,7 @@ class RemoteHttpConnection extends Connection
                 return true;
             }
 
-            $response = $this->httpClient->sendQuery($query, [], 'unprepared');
+            $response = $this->httpClient->sendQuery($this->getName(), $query, [], 'unprepared');
 
             $this->recordsHaveBeenModified();
 
@@ -275,7 +285,7 @@ class RemoteHttpConnection extends Connection
                 return [];
             }
 
-            $response = $this->httpClient->sendQuery($query, $bindings, 'select');
+            $response = $this->httpClient->sendQuery($this->getName(), $query, $bindings, 'select');
 
             // For multiple result sets, return as array of arrays
             return [$response['results'] ?? []];
@@ -300,8 +310,14 @@ class RemoteHttpConnection extends Connection
      */
     protected function executeBeginTransactionStatement()
     {
+        // Update mock PDO transaction state
+        $pdo = $this->getPdo();
+        if (method_exists($pdo, 'beginTransaction')) {
+            $pdo->beginTransaction();
+        }
+
         $this->run('BEGIN', [], function ($query, $bindings) {
-            $this->httpClient->sendQuery($query, $bindings, 'transaction');
+            $this->httpClient->sendQuery($this->getName(), $query, $bindings, 'transaction');
         });
     }
 
@@ -314,8 +330,14 @@ class RemoteHttpConnection extends Connection
     {
         if ($this->transactionLevel() == 1) {
             $this->run('COMMIT', [], function ($query, $bindings) {
-                $this->httpClient->sendQuery($query, $bindings, 'transaction');
+                $this->httpClient->sendQuery($this->getName(), $query, $bindings, 'transaction');
             });
+
+            // Update mock PDO transaction state
+            $pdo = $this->getPdo();
+            if (method_exists($pdo, 'commit')) {
+                $pdo->commit();
+            }
         }
 
         parent::commit();
@@ -331,8 +353,14 @@ class RemoteHttpConnection extends Connection
     {
         if ($this->transactionLevel() == 1) {
             $this->run('ROLLBACK', [], function ($query, $bindings) {
-                $this->httpClient->sendQuery($query, $bindings, 'transaction');
+                $this->httpClient->sendQuery($this->getName(), $query, $bindings, 'transaction');
             });
+
+            // Update mock PDO transaction state
+            $pdo = $this->getPdo();
+            if (method_exists($pdo, 'rollBack')) {
+                $pdo->rollBack();
+            }
         }
 
         parent::rollBack($toLevel);
@@ -347,7 +375,7 @@ class RemoteHttpConnection extends Connection
     {
         $savepoint = 'trans'.($this->transactions + 1);
         $this->run($this->queryGrammar->compileSavepoint($savepoint), [], function ($query, $bindings) {
-            $this->httpClient->sendQuery($query, $bindings, 'transaction');
+            $this->httpClient->sendQuery($this->getName(), $query, $bindings, 'transaction');
         });
     }
 
@@ -376,5 +404,82 @@ class RemoteHttpConnection extends Connection
     {
         $this->httpClient->clearSession();
         parent::disconnect();
+    }
+
+    /**
+     * Detect the remote database type.
+     *
+     * @return string
+     */
+    protected function detectRemoteDatabaseType(): string
+    {
+        if ($this->remoteDatabaseType !== null) {
+            return $this->remoteDatabaseType;
+        }
+
+        // Mark as detecting to avoid recursion
+        $this->remoteDatabaseType = 'detecting';
+
+        try {
+            // Try to detect SQLite first (SQLite doesn't support VERSION())
+            try {
+                $response = $this->httpClient->sendQuery($this->getName(), 'SELECT sqlite_version() as version', [], 'select');
+                if (isset($response['results']) && ! empty($response['results'])) {
+                    $this->remoteDatabaseType = 'sqlite';
+                    return 'sqlite';
+                }
+            } catch (\Exception $e) {
+                // Not SQLite, try MySQL/MariaDB
+            }
+
+            // Try MySQL/MariaDB VERSION()
+            try {
+                $response = $this->httpClient->sendQuery($this->getName(), 'SELECT VERSION() as version', [], 'select');
+                if (isset($response['results']) && ! empty($response['results'])) {
+                    $version = $response['results'][0]['version'] ?? '';
+                    if (stripos($version, 'mariadb') !== false) {
+                        $this->remoteDatabaseType = 'mariadb';
+                    } else {
+                        $this->remoteDatabaseType = 'mysql';
+                    }
+                    return $this->remoteDatabaseType;
+                }
+            } catch (\Exception $e) {
+                // Fallback to mysql if detection fails
+            }
+
+            // Default to mysql if all detection fails
+            $this->remoteDatabaseType = 'mysql';
+            return 'mysql';
+        } catch (\Exception $e) {
+            // Default to mysql if all detection fails
+            $this->remoteDatabaseType = 'mysql';
+            return 'mysql';
+        }
+    }
+
+    /**
+     * Process query to handle database-specific syntax differences.
+     *
+     * @param  string  $query
+     * @return string
+     */
+    protected function processQueryForRemoteDatabase(string $query): string
+    {
+        // Skip processing if we're still detecting (to avoid recursion)
+        if ($this->remoteDatabaseType === 'detecting') {
+            return $query;
+        }
+
+        $dbType = $this->detectRemoteDatabaseType();
+
+        // SQLite doesn't support FOR UPDATE, so we need to strip it
+        if ($dbType === 'sqlite') {
+            // Remove FOR UPDATE clause (case-insensitive)
+            // This handles: "FOR UPDATE", "FOR UPDATE NOWAIT", "FOR UPDATE SKIP LOCKED", etc.
+            $query = preg_replace('/\s+FOR\s+UPDATE(\s+(NOWAIT|SKIP\s+LOCKED|OF\s+[^\s]+))?(\s+.*)?$/i', '', $query);
+        }
+
+        return $query;
     }
 }

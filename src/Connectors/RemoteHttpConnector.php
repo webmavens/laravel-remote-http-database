@@ -5,6 +5,7 @@ namespace Laravel\RemoteHttpDatabase\Connectors;
 use Illuminate\Database\Connectors\ConnectorInterface;
 use InvalidArgumentException;
 use PDO;
+use PDOStatement;
 
 class RemoteHttpConnector implements ConnectorInterface
 {
@@ -15,7 +16,6 @@ class RemoteHttpConnector implements ConnectorInterface
      * that won't actually be used. The RemoteHttpConnection will handle
      * all database operations via HTTP.
      *
-     * @param  array  $config
      * @return \PDO
      *
      * @throws \InvalidArgumentException
@@ -41,25 +41,93 @@ class RemoteHttpConnector implements ConnectorInterface
 
         // Return a mock PDO object that won't be used
         // The RemoteHttpConnection will override all PDO-dependent methods
-        return new class extends PDO {
+        // Initialize with in-memory SQLite to make PDO properly initialized
+        return new class extends PDO
+        {
+            /** @var bool */
+            private $transactionState = false;
+
             public function __construct()
             {
-                // Empty constructor - this is a mock PDO
+                // Initialize with in-memory SQLite to make PDO properly initialized
+                // This won't be used for actual operations
+                parent::__construct('sqlite::memory:');
             }
 
-            public function prepare($statement, $options = [])
+            /**
+             * @param string $query
+             * @param array $options
+             * @return PDOStatement|false
+             */
+            public function prepare($query, $options = [])
             {
                 throw new \RuntimeException('Direct PDO operations are not supported. Use Laravel query builder.');
             }
 
+            /**
+             * @param string $statement
+             * @return int|false
+             */
             public function exec($statement)
             {
                 throw new \RuntimeException('Direct PDO operations are not supported. Use Laravel query builder.');
             }
 
-            public function query($statement, $mode = PDO::ATTR_DEFAULT_FETCH_MODE, $arg3 = null, array $constructorArgs = [])
+            /**
+             * @param string $query
+             * @param int|null $fetchMode
+             * @param mixed ...$fetchModeArgs
+             * @return PDOStatement|false
+             */
+            public function query($query, $fetchMode = null, ...$fetchModeArgs)
             {
                 throw new \RuntimeException('Direct PDO operations are not supported. Use Laravel query builder.');
+            }
+
+            /**
+             * @return bool
+             */
+            public function inTransaction()
+            {
+                // Return the tracked transaction state
+                // The RemoteHttpConnection manages transactions via HTTP
+                return $this->transactionState;
+            }
+
+            /**
+             * @return bool
+             */
+            public function beginTransaction()
+            {
+                // Track transaction state but don't actually begin a transaction
+                // The RemoteHttpConnection handles this via HTTP
+                $this->transactionState = true;
+
+                return true;
+            }
+
+            /**
+             * @return bool
+             */
+            public function commit()
+            {
+                // Track transaction state but don't actually commit
+                // The RemoteHttpConnection handles this via HTTP
+                $this->transactionState = false;
+
+                return true;
+            }
+
+            /**
+             * @return bool
+             */
+            public function rollBack()
+            {
+                // Track transaction state but don't actually rollback
+                // The RemoteHttpConnection handles this via HTTP
+                $this->transactionState = false;
+
+                return true;
             }
         };
     }
