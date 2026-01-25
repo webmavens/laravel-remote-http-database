@@ -7,8 +7,8 @@ A Laravel package that provides a custom database adapter for communicating with
 1. **Install on both servers**: `composer require webmavens/laravel-remote-http-database`
 2. **Generate keys** (run once, use on both servers):
    ```bash
-   php -r "echo 'API_KEY=' . bin2hex(random_bytes(32)) . PHP_EOL;"
-   php -r "echo 'ENCRYPTION_KEY=' . base64_encode(random_bytes(32)) . PHP_EOL;"
+   php -r "echo 'REMOTE_DB_API_KEY=' . bin2hex(random_bytes(32)) . PHP_EOL;"
+   php -r "echo 'REMOTE_DB_ENCRYPTION_KEY=' . base64_encode(random_bytes(32)) . PHP_EOL;"
    ```
 3. **Server 1** (has MySQL): Set `REMOTE_DB_API_KEY` and `REMOTE_DB_ENCRYPTION_KEY` in `.env` (optionally add `REMOTE_DB_ALLOWED_IPS` for IP whitelisting)
 4. **Server 2** (client): Set `DB_CONNECTION=remote-http`, `DB_REMOTE_ENDPOINT`, `DB_REMOTE_API_KEY`, and `DB_REMOTE_ENCRYPTION_KEY` in `.env`
