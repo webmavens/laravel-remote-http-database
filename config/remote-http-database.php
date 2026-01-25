@@ -28,6 +28,21 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Performance Optimization
+    |--------------------------------------------------------------------------
+    |
+    | These settings help optimize performance by reducing HTTP requests.
+    |
+    */
+
+    'enable_batching' => env('DB_REMOTE_ENABLE_BATCHING', true),
+
+    'enable_caching' => env('DB_REMOTE_ENABLE_CACHING', true),
+
+    'cache_ttl' => env('DB_REMOTE_CACHE_TTL', 60),
+
+    /*
+    |--------------------------------------------------------------------------
     | Endpoint Configuration (Server 1 - Has MySQL)
     |--------------------------------------------------------------------------
     |

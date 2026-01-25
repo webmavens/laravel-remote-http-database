@@ -135,6 +135,9 @@ Open `config/database.php` and add the following connection to the `connections`
         'timeout' => env('DB_REMOTE_TIMEOUT', 30),
         'verify_ssl' => env('DB_REMOTE_VERIFY_SSL', true),
         'retry_attempts' => env('DB_REMOTE_RETRY_ATTEMPTS', 3),
+        'enable_batching' => env('DB_REMOTE_ENABLE_BATCHING', true),
+        'enable_caching' => env('DB_REMOTE_ENABLE_CACHING', true),
+        'cache_ttl' => env('DB_REMOTE_CACHE_TTL', 60),
         'prefix' => '',
         'prefix_indexes' => true,
     ],
@@ -157,6 +160,11 @@ DB_DATABASE=your_database_name
 DB_REMOTE_TIMEOUT=30
 DB_REMOTE_VERIFY_SSL=true
 DB_REMOTE_RETRY_ATTEMPTS=3
+
+# Performance Optimization (optional)
+DB_REMOTE_ENABLE_BATCHING=true
+DB_REMOTE_ENABLE_CACHING=true
+DB_REMOTE_CACHE_TTL=60
 ```
 
 **Critical**: The `DB_REMOTE_API_KEY` and `DB_REMOTE_ENCRYPTION_KEY` must **exactly match** the values on Server 1.
@@ -251,6 +259,9 @@ php artisan migrate
 | `timeout` | `DB_REMOTE_TIMEOUT` | HTTP request timeout in seconds | `30` |
 | `verify_ssl` | `DB_REMOTE_VERIFY_SSL` | Whether to verify SSL certificates | `true` |
 | `retry_attempts` | `DB_REMOTE_RETRY_ATTEMPTS` | Number of retry attempts on failure | `3` |
+| `enable_batching` | `DB_REMOTE_ENABLE_BATCHING` | Enable query batching to reduce HTTP requests | `true` |
+| `enable_caching` | `DB_REMOTE_ENABLE_CACHING` | Enable query result caching | `true` |
+| `cache_ttl` | `DB_REMOTE_CACHE_TTL` | Cache TTL in seconds for SELECT queries | `60` |
 
 ### Server Configuration (Server 1)
 
@@ -265,19 +276,86 @@ php artisan migrate
 
 1. **Query Execution**: When Laravel executes a database query, the `RemoteHttpConnection` intercepts it.
 
-2. **Encryption**: The query and bindings are encrypted using AES-256-GCM with a unique IV for each request.
+2. **Caching Check**: If caching is enabled, the connection first checks if the query result is cached. If found and not expired, it returns the cached result immediately without making an HTTP request.
 
-3. **HTTP Request**: The encrypted payload is sent to the remote endpoint via HTTPS POST with the API key in headers.
+3. **Query Batching**: If batching is enabled, multiple queries can be queued and sent together in a single HTTP request, reducing network overhead.
 
-4. **Remote Processing**: The endpoint on Server 1:
+4. **Encryption**: The query and bindings are encrypted using AES-256-GCM with a unique IV for each request.
+
+5. **HTTP Request**: The encrypted payload is sent to the remote endpoint via HTTPS POST with the API key in headers.
+
+6. **Remote Processing**: The endpoint on Server 1:
    - Validates IP address (if whitelisting is enabled)
    - Validates the API key
    - Decrypts the payload
-   - Executes the query on MySQL
+   - Executes the query/queries on MySQL
    - Maintains transaction state per session
    - Encrypts the response
 
-5. **Response**: The encrypted response is sent back, decrypted, and returned to Laravel as if it came from a local database.
+7. **Response**: The encrypted response is sent back, decrypted, and returned to Laravel as if it came from a local database.
+
+8. **Cache Storage**: For SELECT queries, the result is cached (if caching is enabled) to avoid redundant requests for the same query.
+
+## Performance Optimization
+
+This package includes built-in performance optimizations to reduce HTTP requests and improve page load times:
+
+### Query Caching
+
+Query result caching stores SELECT query results in memory to avoid redundant HTTP requests. This is especially useful for:
+- Frequently accessed data
+- Dashboard queries
+- Navigation menus
+- Configuration lookups
+
+**Configuration:**
+```env
+DB_REMOTE_ENABLE_CACHING=true
+DB_REMOTE_CACHE_TTL=60  # Cache for 60 seconds
+```
+
+The cache is automatically invalidated when write operations (INSERT, UPDATE, DELETE) are performed.
+
+### Query Batching
+
+Query batching allows multiple queries to be sent in a single HTTP request, reducing network round-trips. This is particularly beneficial when:
+- Loading related data (e.g., user with posts)
+- Processing multiple records
+- Executing multiple queries in a single request
+
+**Configuration:**
+```env
+DB_REMOTE_ENABLE_BATCHING=true
+```
+
+**Note:** Batching is automatically disabled during transactions to ensure data consistency.
+
+### Performance Tips
+
+1. **Enable Caching**: For read-heavy applications, enable caching with an appropriate TTL:
+   ```env
+   DB_REMOTE_ENABLE_CACHING=true
+   DB_REMOTE_CACHE_TTL=300  # 5 minutes for relatively static data
+   ```
+
+2. **Use Eager Loading**: When using Eloquent, use eager loading to reduce the number of queries:
+   ```php
+   // Instead of N+1 queries
+   $users = User::all();
+   foreach ($users as $user) {
+       $user->posts; // N queries
+   }
+   
+   // Use eager loading
+   $users = User::with('posts')->get(); // 2 queries total
+   ```
+
+3. **Optimize Queries**: Review your application's queries and identify:
+   - Duplicate queries that can benefit from caching
+   - Queries that can be combined
+   - Unnecessary queries that can be removed
+
+4. **Monitor Cache Hit Rate**: Consider adding logging to monitor cache effectiveness in production.
 
 ## IP Whitelisting
 

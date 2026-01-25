@@ -34,6 +34,41 @@ class RemoteHttpConnection extends Connection
     protected $remoteDatabaseType = null;
 
     /**
+     * Query batch queue for batching multiple queries.
+     *
+     * @var array
+     */
+    protected $queryBatch = [];
+
+    /**
+     * Whether batching is enabled.
+     *
+     * @var bool
+     */
+    protected $batchingEnabled = false;
+
+    /**
+     * Query result cache.
+     *
+     * @var array
+     */
+    protected static $queryCache = [];
+
+    /**
+     * Whether caching is enabled.
+     *
+     * @var bool
+     */
+    protected $cachingEnabled = false;
+
+    /**
+     * Cache TTL in seconds.
+     *
+     * @var int
+     */
+    protected $cacheTtl = 60;
+
+    /**
      * Create a new remote HTTP connection instance.
      *
      * @param  \PDO|\Closure  $pdo
@@ -58,6 +93,13 @@ class RemoteHttpConnection extends Connection
                 'retry_attempts' => $config['retry_attempts'] ?? 3,
             ]
         );
+
+        // Enable batching if configured
+        $this->batchingEnabled = $config['enable_batching'] ?? env('DB_REMOTE_ENABLE_BATCHING', true);
+        
+        // Enable caching if configured
+        $this->cachingEnabled = $config['enable_caching'] ?? env('DB_REMOTE_ENABLE_CACHING', true);
+        $this->cacheTtl = $config['cache_ttl'] ?? env('DB_REMOTE_CACHE_TTL', 60);
     }
 
     /**
@@ -142,10 +184,46 @@ class RemoteHttpConnection extends Connection
             // Process query to handle database-specific syntax
             $query = $this->processQueryForRemoteDatabase($query);
 
+            // Check cache first (only for SELECT queries)
+            if ($this->cachingEnabled) {
+                $cacheKey = $this->getCacheKey($query, $bindings);
+                if (isset(self::$queryCache[$cacheKey])) {
+                    $cached = self::$queryCache[$cacheKey];
+                    if ($cached['expires_at'] > time()) {
+                        $results = $cached['results'];
+                        // Convert to objects if needed
+                        $fetchMode = $this->fetchMode;
+                        if ($fetchMode === PDO::FETCH_OBJ) {
+                            return array_map(function ($row) {
+                                return (object) $row;
+                            }, $results);
+                        }
+                        return $results;
+                    } else {
+                        unset(self::$queryCache[$cacheKey]);
+                    }
+                }
+            }
+
             $response = $this->httpClient->sendQuery($this->getName(), $query, $bindings, 'select');
 
             // Convert results to objects if needed
             $results = $response['results'] ?? [];
+            
+            // Cache the results
+            if ($this->cachingEnabled) {
+                $cacheKey = $this->getCacheKey($query, $bindings);
+                self::$queryCache[$cacheKey] = [
+                    'results' => $results,
+                    'expires_at' => time() + $this->cacheTtl,
+                ];
+                
+                // Limit cache size to prevent memory issues
+                if (count(self::$queryCache) > 1000) {
+                    $this->cleanExpiredCache();
+                }
+            }
+            
             $fetchMode = $this->fetchMode;
 
             if ($fetchMode === PDO::FETCH_OBJ) {
@@ -190,6 +268,9 @@ class RemoteHttpConnection extends Connection
                 return true;
             }
 
+            // Invalidate cache on write operations
+            $this->invalidateCache();
+
             $response = $this->httpClient->sendQuery($this->getName(), $query, $bindings, 'insert');
 
             $this->recordsHaveBeenModified();
@@ -217,6 +298,9 @@ class RemoteHttpConnection extends Connection
                 return true;
             }
 
+            // Invalidate cache on write operations
+            $this->invalidateCache();
+
             $response = $this->httpClient->sendQuery($this->getName(), $query, $bindings, 'statement');
 
             $this->recordsHaveBeenModified();
@@ -238,6 +322,9 @@ class RemoteHttpConnection extends Connection
             if ($this->pretending()) {
                 return 0;
             }
+
+            // Invalidate cache on write operations
+            $this->invalidateCache();
 
             $response = $this->httpClient->sendQuery($this->getName(), $query, $bindings, 'affecting');
 
@@ -261,6 +348,9 @@ class RemoteHttpConnection extends Connection
             if ($this->pretending()) {
                 return true;
             }
+
+            // Invalidate cache on write operations
+            $this->invalidateCache();
 
             $response = $this->httpClient->sendQuery($this->getName(), $query, [], 'unprepared');
 
@@ -481,5 +571,71 @@ class RemoteHttpConnection extends Connection
         }
 
         return $query;
+    }
+
+    /**
+     * Get cache key for a query.
+     *
+     * @param  string  $query
+     * @param  array  $bindings
+     * @return string
+     */
+    protected function getCacheKey($query, $bindings)
+    {
+        return md5($query.serialize($bindings));
+    }
+
+    /**
+     * Invalidate all cached queries.
+     *
+     * @return void
+     */
+    protected function invalidateCache()
+    {
+        self::$queryCache = [];
+    }
+
+    /**
+     * Clean expired cache entries.
+     *
+     * @return void
+     */
+    protected function cleanExpiredCache()
+    {
+        $now = time();
+        foreach (self::$queryCache as $key => $cached) {
+            if ($cached['expires_at'] <= $now) {
+                unset(self::$queryCache[$key]);
+            }
+        }
+    }
+
+    /**
+     * Execute batched queries.
+     *
+     * @return array
+     */
+    protected function executeBatch()
+    {
+        if (empty($this->queryBatch)) {
+            return [];
+        }
+
+        $results = $this->httpClient->sendBatch($this->getName(), $this->queryBatch);
+        $this->queryBatch = [];
+
+        return $results;
+    }
+
+    /**
+     * Flush any pending batched queries.
+     *
+     * @return void
+     */
+    public function flushBatch()
+    {
+        if (! empty($this->queryBatch)) {
+            $this->executeBatch();
+        }
     }
 }

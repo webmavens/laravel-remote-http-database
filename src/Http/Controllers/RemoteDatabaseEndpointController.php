@@ -84,10 +84,8 @@ class RemoteDatabaseEndpointController
             return response()->json(['error' => 'Decryption failed: '.$e->getMessage()], 400);
         }
 
-        // Extract request data
-        $query = $decrypted['query'] ?? '';
-        $bindings = $decrypted['bindings'] ?? [];
-        $type = $decrypted['type'] ?? 'select';
+        // Check if this is a batch request
+        $isBatch = isset($decrypted['batch']) && $decrypted['batch'] === true;
         $sessionId = $decrypted['session_id'] ?? null;
 
         // Get or create session for transaction state
@@ -112,103 +110,77 @@ class RemoteDatabaseEndpointController
             return response()->json(['error' => 'Database connection failed: '.$e->getMessage()], 500);
         }
 
-        // Execute query based on type
-        $response = [
-            'success' => true,
-            'session_id' => $sessionId,
-        ];
+        // Handle batch requests
+        if ($isBatch) {
+            $queries = $decrypted['queries'] ?? [];
+            $results = [];
 
-        try {
-            switch ($type) {
-                case 'transaction':
-                    // Handle transaction commands
-                    if (stripos($query, 'BEGIN') === 0 || stripos($query, 'START TRANSACTION') === 0) {
-                        // Check actual PDO state, not just session data
-                        if (! $pdo->inTransaction()) {
-                            $pdo->beginTransaction();
-                            $sessionData['in_transaction'] = true;
-                            $sessionData['transaction_level'] = 1;
-                        } else {
-                            // Nested transaction - create savepoint
-                            $savepoint = 'sp_'.($sessionData['transaction_level'] + 1);
-                            $pdo->exec("SAVEPOINT {$savepoint}");
-                            $sessionData['transaction_level']++;
-                        }
-                    } elseif (stripos($query, 'COMMIT') === 0) {
-                        // Check actual PDO state before committing
-                        if ($pdo->inTransaction()) {
-                            if (! isset($sessionData['transaction_level']) || $sessionData['transaction_level'] <= 1) {
-                                $pdo->commit();
-                                $sessionData['in_transaction'] = false;
-                                $sessionData['transaction_level'] = 0;
-                            } else {
-                                // Release savepoint
-                                $sessionData['transaction_level']--;
-                            }
-                        } else {
-                            // No active transaction - sync session state
-                            $sessionData['in_transaction'] = false;
-                            $sessionData['transaction_level'] = 0;
-                        }
-                    } elseif (stripos($query, 'ROLLBACK') === 0) {
-                        // Check actual PDO state before rolling back
-                        if ($pdo->inTransaction()) {
-                            if (! isset($sessionData['transaction_level']) || $sessionData['transaction_level'] <= 1) {
-                                $pdo->rollBack();
-                                $sessionData['in_transaction'] = false;
-                                $sessionData['transaction_level'] = 0;
-                            } else {
-                                // Rollback to savepoint
-                                $savepoint = 'sp_'.$sessionData['transaction_level'];
-                                $pdo->exec("ROLLBACK TO SAVEPOINT {$savepoint}");
-                                $sessionData['transaction_level']--;
-                            }
-                        } else {
-                            // No active transaction - sync session state
-                            $sessionData['in_transaction'] = false;
-                            $sessionData['transaction_level'] = 0;
-                        }
+            foreach ($queries as $queryData) {
+                $query = $queryData['query'] ?? '';
+                $bindings = $queryData['bindings'] ?? [];
+                $type = $queryData['type'] ?? 'select';
+
+                try {
+                    $result = $this->executeQuery($pdo, $query, $bindings, $type, $sessionData);
+                    $results[] = $result;
+                } catch (\PDOException $e) {
+                    if (stripos($e->getMessage(), 'no active transaction') !== false) {
+                        $sessionData['in_transaction'] = false;
+                        $sessionData['transaction_level'] = 0;
+                        $results[] = ['success' => true];
+                    } else {
+                        $results[] = [
+                            'success' => false,
+                            'error' => $e->getMessage(),
+                            'code' => $e->getCode(),
+                        ];
                     }
-                    break;
-
-                case 'select':
-                    $statement = $pdo->prepare($query);
-                    $statement->execute($bindings);
-                    $results = $statement->fetchAll(\PDO::FETCH_ASSOC);
-                    $response['results'] = $results;
-                    break;
-
-                case 'insert':
-                    $statement = $pdo->prepare($query);
-                    $statement->execute($bindings);
-                    $response['last_insert_id'] = $pdo->lastInsertId();
-                    $response['rows_affected'] = $statement->rowCount();
-                    break;
-
-                case 'affecting':
-                case 'statement':
-                    $statement = $pdo->prepare($query);
-                    $statement->execute($bindings);
-                    $response['rows_affected'] = $statement->rowCount();
-                    break;
-
-                case 'unprepared':
-                    $rowsAffected = $pdo->exec($query);
-                    $response['rows_affected'] = $rowsAffected;
-                    break;
-
-                default:
-                    throw new \Exception("Unknown query type: {$type}");
+                } catch (\Exception $e) {
+                    $results[] = [
+                        'success' => false,
+                        'error' => $e->getMessage(),
+                        'code' => $e->getCode(),
+                    ];
+                }
             }
-        } catch (\PDOException $e) {
-            // Handle transaction-related errors gracefully
-            if (stripos($e->getMessage(), 'no active transaction') !== false) {
-                // Sync session state when transaction error occurs
-                $sessionData['in_transaction'] = false;
-                $sessionData['transaction_level'] = 0;
-                // Don't treat this as a fatal error - just sync state
-                $response['success'] = true;
-            } else {
+
+            $response = [
+                'success' => true,
+                'session_id' => $sessionId,
+                'results' => $results,
+            ];
+        } else {
+            // Single query request (backward compatible)
+            $query = $decrypted['query'] ?? '';
+            $bindings = $decrypted['bindings'] ?? [];
+            $type = $decrypted['type'] ?? 'select';
+
+            // Execute query based on type
+            $response = [
+                'success' => true,
+                'session_id' => $sessionId,
+            ];
+
+            try {
+                $result = $this->executeQuery($pdo, $query, $bindings, $type, $sessionData);
+                $response = array_merge($response, $result);
+            } catch (\PDOException $e) {
+                // Handle transaction-related errors gracefully
+                if (stripos($e->getMessage(), 'no active transaction') !== false) {
+                    // Sync session state when transaction error occurs
+                    $sessionData['in_transaction'] = false;
+                    $sessionData['transaction_level'] = 0;
+                    // Don't treat this as a fatal error - just sync state
+                    $response['success'] = true;
+                } else {
+                    $response = [
+                        'success' => false,
+                        'error' => $e->getMessage(),
+                        'code' => $e->getCode(),
+                        'session_id' => $sessionId,
+                    ];
+                }
+            } catch (\Exception $e) {
                 $response = [
                     'success' => false,
                     'error' => $e->getMessage(),
@@ -216,13 +188,6 @@ class RemoteDatabaseEndpointController
                     'session_id' => $sessionId,
                 ];
             }
-        } catch (\Exception $e) {
-            $response = [
-                'success' => false,
-                'error' => $e->getMessage(),
-                'code' => $e->getCode(),
-                'session_id' => $sessionId,
-            ];
         }
 
         // Save session data
@@ -244,6 +209,106 @@ class RemoteDatabaseEndpointController
         } catch (\Exception $e) {
             return response()->json(['error' => 'Encryption failed: '.$e->getMessage()], 500);
         }
+    }
+
+    /**
+     * Execute a single query and return the result.
+     *
+     * @param  \PDO  $pdo
+     * @param  string  $query
+     * @param  array  $bindings
+     * @param  string  $type
+     * @param  array  &$sessionData
+     * @return array
+     */
+    protected function executeQuery($pdo, $query, $bindings, $type, &$sessionData)
+    {
+        $result = [];
+
+        switch ($type) {
+            case 'transaction':
+                // Handle transaction commands
+                if (stripos($query, 'BEGIN') === 0 || stripos($query, 'START TRANSACTION') === 0) {
+                    // Check actual PDO state, not just session data
+                    if (! $pdo->inTransaction()) {
+                        $pdo->beginTransaction();
+                        $sessionData['in_transaction'] = true;
+                        $sessionData['transaction_level'] = 1;
+                    } else {
+                        // Nested transaction - create savepoint
+                        $savepoint = 'sp_'.($sessionData['transaction_level'] + 1);
+                        $pdo->exec("SAVEPOINT {$savepoint}");
+                        $sessionData['transaction_level']++;
+                    }
+                } elseif (stripos($query, 'COMMIT') === 0) {
+                    // Check actual PDO state before committing
+                    if ($pdo->inTransaction()) {
+                        if (! isset($sessionData['transaction_level']) || $sessionData['transaction_level'] <= 1) {
+                            $pdo->commit();
+                            $sessionData['in_transaction'] = false;
+                            $sessionData['transaction_level'] = 0;
+                        } else {
+                            // Release savepoint
+                            $sessionData['transaction_level']--;
+                        }
+                    } else {
+                        // No active transaction - sync session state
+                        $sessionData['in_transaction'] = false;
+                        $sessionData['transaction_level'] = 0;
+                    }
+                } elseif (stripos($query, 'ROLLBACK') === 0) {
+                    // Check actual PDO state before rolling back
+                    if ($pdo->inTransaction()) {
+                        if (! isset($sessionData['transaction_level']) || $sessionData['transaction_level'] <= 1) {
+                            $pdo->rollBack();
+                            $sessionData['in_transaction'] = false;
+                            $sessionData['transaction_level'] = 0;
+                        } else {
+                            // Rollback to savepoint
+                            $savepoint = 'sp_'.$sessionData['transaction_level'];
+                            $pdo->exec("ROLLBACK TO SAVEPOINT {$savepoint}");
+                            $sessionData['transaction_level']--;
+                        }
+                    } else {
+                        // No active transaction - sync session state
+                        $sessionData['in_transaction'] = false;
+                        $sessionData['transaction_level'] = 0;
+                    }
+                }
+                $result['success'] = true;
+                break;
+
+            case 'select':
+                $statement = $pdo->prepare($query);
+                $statement->execute($bindings);
+                $results = $statement->fetchAll(\PDO::FETCH_ASSOC);
+                $result['results'] = $results;
+                break;
+
+            case 'insert':
+                $statement = $pdo->prepare($query);
+                $statement->execute($bindings);
+                $result['last_insert_id'] = $pdo->lastInsertId();
+                $result['rows_affected'] = $statement->rowCount();
+                break;
+
+            case 'affecting':
+            case 'statement':
+                $statement = $pdo->prepare($query);
+                $statement->execute($bindings);
+                $result['rows_affected'] = $statement->rowCount();
+                break;
+
+            case 'unprepared':
+                $rowsAffected = $pdo->exec($query);
+                $result['rows_affected'] = $rowsAffected;
+                break;
+
+            default:
+                throw new \Exception("Unknown query type: {$type}");
+        }
+
+        return $result;
     }
 
     /**

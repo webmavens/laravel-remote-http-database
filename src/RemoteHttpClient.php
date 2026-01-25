@@ -220,6 +220,133 @@ class RemoteHttpClient
     }
 
     /**
+     * Send multiple queries in a single batch request.
+     *
+     * @param  string  $connectionName
+     * @param  array  $queries  Array of ['query' => string, 'bindings' => array, 'type' => string]
+     * @return array  Array of responses in the same order as queries
+     *
+     * @throws \Illuminate\Database\QueryException
+     */
+    public function sendBatch($connectionName, array $queries)
+    {
+        if (empty($queries)) {
+            return [];
+        }
+
+        $payload = [
+            'batch' => true,
+            'queries' => $queries,
+        ];
+
+        if ($this->sessionId) {
+            $payload['session_id'] = $this->sessionId;
+        }
+
+        $encryptedPayload = $this->encryption->encrypt($payload);
+
+        $attempts = 0;
+        $lastException = null;
+
+        while ($attempts < $this->retryAttempts) {
+            try {
+                $response = $this->client->post($this->endpoint, [
+                    'headers' => [
+                        'X-API-Key' => $this->apiKey,
+                        'Content-Type' => 'application/json',
+                    ],
+                    'json' => [
+                        'data' => $encryptedPayload,
+                    ],
+                ]);
+
+                $responseData = json_decode($response->getBody()->getContents(), true);
+
+                if (! isset($responseData['data'])) {
+                    if (isset($responseData['error'])) {
+                        throw new QueryException(
+                            $connectionName,
+                            'BATCH_QUERY',
+                            [],
+                            new \Exception($responseData['error'], isset($responseData['code']) ? (int) $responseData['code'] : 0)
+                        );
+                    }
+                    throw new RuntimeException('Invalid response format from remote endpoint.');
+                }
+
+                try {
+                    $decrypted = $this->encryption->decrypt($responseData['data']);
+                } catch (RuntimeException $e) {
+                    throw new RuntimeException('Decryption failed: '.$e->getMessage(), 0, $e);
+                }
+
+                if (! is_array($decrypted)) {
+                    throw new RuntimeException('Invalid decrypted response format.');
+                }
+
+                // Store session ID if provided
+                if (isset($decrypted['session_id'])) {
+                    $this->sessionId = $decrypted['session_id'];
+                }
+
+                // Handle errors from the remote database
+                if (isset($decrypted['success']) && $decrypted['success'] === false) {
+                    $errorCode = isset($decrypted['code']) ? (int) $decrypted['code'] : 0;
+                    throw new QueryException(
+                        $connectionName,
+                        'BATCH_QUERY',
+                        [],
+                        new \Exception($decrypted['error'] ?? 'Unknown error', $errorCode)
+                    );
+                }
+
+                // Return array of results
+                return $decrypted['results'] ?? [];
+
+            } catch (GuzzleException $e) {
+                $lastException = $e;
+                $attempts++;
+
+                if ($attempts >= $this->retryAttempts) {
+                    $errorCode = is_int($e->getCode()) ? $e->getCode() : 0;
+                    throw new QueryException(
+                        $connectionName,
+                        'BATCH_QUERY',
+                        [],
+                        new \Exception('HTTP request failed: '.$e->getMessage(), $errorCode)
+                    );
+                }
+
+                usleep(100000 * $attempts);
+            } catch (RuntimeException $e) {
+                if (stripos($e->getMessage(), 'SQLSTATE') !== false || stripos($e->getMessage(), 'SQL') !== false) {
+                    $errorCode = is_int($e->getCode()) ? $e->getCode() : 0;
+                    throw new QueryException(
+                        $connectionName,
+                        'BATCH_QUERY',
+                        [],
+                        new \Exception($e->getMessage(), $errorCode)
+                    );
+                }
+                $errorCode = is_int($e->getCode()) ? $e->getCode() : 0;
+                throw new QueryException(
+                    $connectionName,
+                    'BATCH_QUERY',
+                    [],
+                    new \Exception('Encryption/Decryption error: '.$e->getMessage(), $errorCode)
+                );
+            }
+        }
+
+        throw new QueryException(
+            $connectionName,
+            'BATCH_QUERY',
+            [],
+            new \Exception('Request failed after '.$this->retryAttempts.' attempts', 0)
+        );
+    }
+
+    /**
      * Get the current session ID.
      *
      * @return string|null
