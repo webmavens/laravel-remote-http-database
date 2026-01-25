@@ -87,7 +87,7 @@ class RemoteHttpConnector implements ConnectorInterface
             /**
              * @return bool
              */
-            public function inTransaction()
+            public function inTransaction(): bool
             {
                 // Return the tracked transaction state
                 // The RemoteHttpConnection manages transactions via HTTP
@@ -97,7 +97,7 @@ class RemoteHttpConnector implements ConnectorInterface
             /**
              * @return bool
              */
-            public function beginTransaction()
+            public function beginTransaction(): bool
             {
                 // Track transaction state but don't actually begin a transaction
                 // The RemoteHttpConnection handles this via HTTP
@@ -109,7 +109,7 @@ class RemoteHttpConnector implements ConnectorInterface
             /**
              * @return bool
              */
-            public function commit()
+            public function commit(): bool
             {
                 // Track transaction state but don't actually commit
                 // The RemoteHttpConnection handles this via HTTP
@@ -121,7 +121,7 @@ class RemoteHttpConnector implements ConnectorInterface
             /**
              * @return bool
              */
-            public function rollBack()
+            public function rollBack(): bool
             {
                 // Track transaction state but don't actually rollback
                 // The RemoteHttpConnection handles this via HTTP
