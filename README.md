@@ -11,8 +11,9 @@ A Laravel package that provides a custom database adapter for communicating with
    php -r "echo 'REMOTE_DB_ENCRYPTION_KEY=' . base64_encode(random_bytes(32)) . PHP_EOL;"
    ```
 3. **Server 1** (has MySQL): Set `REMOTE_DB_API_KEY` and `REMOTE_DB_ENCRYPTION_KEY` in `.env` (optionally add `REMOTE_DB_ALLOWED_IPS` for IP whitelisting)
-4. **Server 2** (client): Set `DB_CONNECTION=remote-http`, `DB_REMOTE_ENDPOINT`, `DB_REMOTE_API_KEY`, and `DB_REMOTE_ENCRYPTION_KEY` in `.env`
-5. **Add connection** to `config/database.php` on Server 2 (see Step 4 below)
+4. **Server 2** (client): 
+   - **⚠️ REQUIRED: Manually add the `remote-http` connection to `config/database.php`** (see Step 4 below for the exact code)
+   - Set `DB_CONNECTION=remote-http`, `DB_REMOTE_ENDPOINT`, `DB_REMOTE_API_KEY`, and `DB_REMOTE_ENCRYPTION_KEY` in `.env`
 
 See the [Installation](#installation) section for detailed steps.
 
@@ -115,7 +116,11 @@ You should see a JSON response with endpoint information.
 
 Server 2 connects to Server 1's endpoint to access the database.
 
+**⚠️ IMPORTANT: Manual code edit required!** You must manually add the `remote-http` connection configuration to your `config/database.php` file. This cannot be done automatically.
+
 1. **Add the remote-http connection to `config/database.php`**:
+
+Open `config/database.php` and add the following connection to the `connections` array:
 
 ```php
 'connections' => [
@@ -135,6 +140,8 @@ Server 2 connects to Server 1's endpoint to access the database.
     ],
 ],
 ```
+
+**Note:** The `encryption_key` line handles both base64-encoded and raw 32-byte keys automatically. Make sure to add this connection configuration exactly as shown above.
 
 2. **Configure your `.env` file**:
 
