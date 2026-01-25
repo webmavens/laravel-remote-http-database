@@ -120,7 +120,7 @@ Server 2 connects to Server 1's endpoint to access the database.
 
 1. **Add the remote-http connection to `config/database.php`**:
 
-Open `config/database.php` and add the following connection to the `connections` array:
+Open `config/database.php` and add the following connection to the `connections` array. **Important:** This configuration safely handles cases where `DB_REMOTE_ENDPOINT` is not set (e.g., on Server 1), preventing PHP deprecation warnings:
 
 ```php
 'connections' => [
@@ -130,7 +130,16 @@ Open `config/database.php` and add the following connection to the `connections`
         'driver' => 'remote-http',
         'endpoint' => env('DB_REMOTE_ENDPOINT'),
         'api_key' => env('DB_REMOTE_API_KEY'),
-        'encryption_key' => base64_decode(env('DB_REMOTE_ENCRYPTION_KEY'), true) ?: env('DB_REMOTE_ENCRYPTION_KEY'),
+        'encryption_key' => (function() {
+            $key = env('DB_REMOTE_ENCRYPTION_KEY');
+            // Return null if key is not set (prevents deprecation warning on Server 1)
+            if ($key === null) {
+                return null;
+            }
+            // Try to decode base64, fallback to raw key if decoding fails or length is wrong
+            $decoded = base64_decode($key, true);
+            return ($decoded !== false && strlen($decoded) === 32) ? $decoded : $key;
+        })(),
         'database' => env('DB_DATABASE', 'laravel'),
         'timeout' => env('DB_REMOTE_TIMEOUT', 30),
         'verify_ssl' => env('DB_REMOTE_VERIFY_SSL', true),
@@ -144,7 +153,10 @@ Open `config/database.php` and add the following connection to the `connections`
 ],
 ```
 
-**Note:** The `encryption_key` line handles both base64-encoded and raw 32-byte keys automatically. Make sure to add this connection configuration exactly as shown above.
+**Note:** 
+- The `encryption_key` configuration safely handles both base64-encoded and raw 32-byte keys automatically.
+- It prevents PHP 8.1+ deprecation warnings when `DB_REMOTE_ENCRYPTION_KEY` is not set (e.g., on Server 1 which doesn't need this connection).
+- The connection will only be used when `DB_REMOTE_ENDPOINT` is configured in your `.env` file.
 
 2. **Configure your `.env` file**:
 
