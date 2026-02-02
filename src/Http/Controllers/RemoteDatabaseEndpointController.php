@@ -6,17 +6,26 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Laravel\RemoteHttpDatabase\RemoteHttpEncryption;
+use Laravel\RemoteHttpDatabase\Session\SessionStorageFactory;
+use Laravel\RemoteHttpDatabase\Session\SessionStorageInterface;
 
 class RemoteDatabaseEndpointController
 {
+    /**
+     * The session storage instance.
+     *
+     * @var \Laravel\RemoteHttpDatabase\Session\SessionStorageInterface|null
+     */
+    protected $sessionStorage;
+
     /**
      * Handle remote database requests.
      */
     public function __invoke(Request $request): JsonResponse
     {
-        // Configuration - Get from config or env
-        $apiKey = config('remote-http-database.endpoint_api_key') ?? env('REMOTE_DB_API_KEY');
-        $encryptionKey = config('remote-http-database.endpoint_encryption_key') ?? env('REMOTE_DB_ENCRYPTION_KEY');
+        // Configuration - Get from config only (avoid env() for cached config compatibility)
+        $apiKey = config('remote-http-database.endpoint_api_key');
+        $encryptionKey = config('remote-http-database.endpoint_encryption_key');
 
         // Validate configuration
         if (empty($apiKey) || empty($encryptionKey)) {
@@ -34,11 +43,11 @@ class RemoteDatabaseEndpointController
         }
 
         // Validate IP whitelist if configured
-        $allowedIps = config('remote-http-database.endpoint_allowed_ips') ?? env('REMOTE_DB_ALLOWED_IPS');
+        $allowedIps = config('remote-http-database.endpoint_allowed_ips');
         if (! empty($allowedIps)) {
             $clientIp = $this->getClientIp($request);
             $allowedIpList = array_map('trim', explode(',', $allowedIps));
-            
+
             if (! in_array($clientIp, $allowedIpList)) {
                 return response()->json(['error' => 'Forbidden: IP address not allowed'], 403);
             }
@@ -62,10 +71,10 @@ class RemoteDatabaseEndpointController
             return response()->json(['error' => 'Method not allowed'], 405);
         }
 
-        // Validate API key
+        // Validate API key using constant-time comparison to prevent timing attacks
         $providedApiKey = $request->header('X-API-Key');
 
-        if ($providedApiKey !== $apiKey) {
+        if (! hash_equals($apiKey, $providedApiKey ?? '')) {
             return response()->json(['error' => 'Unauthorized'], 401);
         }
 
@@ -93,14 +102,9 @@ class RemoteDatabaseEndpointController
             $sessionId = bin2hex(random_bytes(16));
         }
 
-        // Initialize session storage (using file-based sessions for simplicity)
-        // In production, consider using Redis or database sessions
-        $sessionFile = sys_get_temp_dir().'/remote_db_session_'.$sessionId.'.json';
-        $sessionData = [];
-
-        if (file_exists($sessionFile)) {
-            $sessionData = json_decode(file_get_contents($sessionFile), true) ?: [];
-        }
+        // Initialize session storage using configured driver
+        $sessionStorage = $this->getSessionStorage();
+        $sessionData = $sessionStorage->get($sessionId);
 
         // Get database connection
         try {
@@ -190,16 +194,11 @@ class RemoteDatabaseEndpointController
             }
         }
 
-        // Save session data
-        file_put_contents($sessionFile, json_encode($sessionData));
+        // Save session data using configured storage driver
+        $sessionStorage->save($sessionId, $sessionData);
 
-        // Clean up old session files (older than 1 hour)
-        $files = glob(sys_get_temp_dir().'/remote_db_session_*.json');
-        foreach ($files as $file) {
-            if (filemtime($file) < time() - 3600) {
-                @unlink($file);
-            }
-        }
+        // Cleanup expired sessions (handled by storage driver)
+        $sessionStorage->cleanup();
 
         // Encrypt and return response
         try {
@@ -209,6 +208,31 @@ class RemoteDatabaseEndpointController
         } catch (\Exception $e) {
             return response()->json(['error' => 'Encryption failed: '.$e->getMessage()], 500);
         }
+    }
+
+    /**
+     * Get the session storage instance.
+     *
+     * @return \Laravel\RemoteHttpDatabase\Session\SessionStorageInterface
+     */
+    protected function getSessionStorage(): SessionStorageInterface
+    {
+        if ($this->sessionStorage !== null) {
+            return $this->sessionStorage;
+        }
+
+        $driver = config('remote-http-database.session_driver', 'file');
+        $lifetime = config('remote-http-database.session_lifetime', 3600);
+
+        $config = [
+            'lifetime' => $lifetime,
+            'connection' => config('remote-http-database.session_redis_connection', 'default'),
+            'table' => config('remote-http-database.session_table', 'remote_db_sessions'),
+        ];
+
+        $this->sessionStorage = SessionStorageFactory::create($driver, $config);
+
+        return $this->sessionStorage;
     }
 
     /**
@@ -314,29 +338,68 @@ class RemoteDatabaseEndpointController
     /**
      * Get the client's IP address, handling proxies correctly.
      *
+     * Only trusts X-Forwarded-For and X-Real-IP headers when the request
+     * comes from a configured trusted proxy to prevent IP spoofing attacks.
+     *
      * @param  \Illuminate\Http\Request  $request
      * @return string
      */
     protected function getClientIp(Request $request): string
     {
-        // Check for IP in X-Forwarded-For header (when behind proxy/load balancer)
+        $directIp = $request->ip();
+        $trustedProxies = config('remote-http-database.trusted_proxies');
+
+        // If no trusted proxies are configured, only use direct IP
+        // This prevents IP spoofing via X-Forwarded-For header
+        if (empty($trustedProxies)) {
+            return $directIp;
+        }
+
+        // Check if the direct connection is from a trusted proxy
+        $trustedProxyList = array_map('trim', explode(',', $trustedProxies));
+        $isTrustedProxy = $trustedProxies === '*' || in_array($directIp, $trustedProxyList);
+
+        if (! $isTrustedProxy) {
+            // Request is not from a trusted proxy, ignore forwarded headers
+            return $directIp;
+        }
+
+        // Request is from a trusted proxy, we can trust the forwarded headers
+        // Check for IP in X-Forwarded-For header
         $forwardedFor = $request->header('X-Forwarded-For');
         if ($forwardedFor) {
-            // X-Forwarded-For can contain multiple IPs, take the first one
-            $ips = explode(',', $forwardedFor);
-            $ip = trim($ips[0]);
-            if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
-                return $ip;
+            // X-Forwarded-For contains a chain: client, proxy1, proxy2, ...
+            // The rightmost untrusted IP is the actual client
+            $ips = array_map('trim', explode(',', $forwardedFor));
+
+            // Walk backwards through the chain to find the first untrusted IP
+            // This is the actual client IP
+            for ($i = count($ips) - 1; $i >= 0; $i--) {
+                $ip = $ips[$i];
+                if (! filter_var($ip, FILTER_VALIDATE_IP)) {
+                    continue;
+                }
+
+                // If this IP is not a trusted proxy, it's the client
+                if ($trustedProxies !== '*' && ! in_array($ip, $trustedProxyList)) {
+                    return $ip;
+                }
+            }
+
+            // If all IPs in the chain are trusted proxies, use the leftmost one
+            $firstIp = trim($ips[0]);
+            if (filter_var($firstIp, FILTER_VALIDATE_IP)) {
+                return $firstIp;
             }
         }
 
-        // Check for IP in X-Real-IP header
+        // Check for IP in X-Real-IP header (simpler, set by nginx/other proxies)
         $realIp = $request->header('X-Real-IP');
         if ($realIp && filter_var($realIp, FILTER_VALIDATE_IP)) {
             return $realIp;
         }
 
-        // Fall back to request IP
-        return $request->ip();
+        // Fall back to direct connection IP
+        return $directIp;
     }
 }

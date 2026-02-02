@@ -69,4 +69,76 @@ return [
     */
 
     'endpoint_allowed_ips' => env('REMOTE_DB_ALLOWED_IPS'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Trusted Proxies for IP Detection
+    |--------------------------------------------------------------------------
+    |
+    | When behind a load balancer or reverse proxy, you need to specify which
+    | proxies are trusted to provide the X-Forwarded-For header. Only IPs from
+    | trusted proxies will be used for IP whitelist validation.
+    | Comma-separated list of trusted proxy IPs, or '*' to trust all (not recommended).
+    |
+    */
+
+    'trusted_proxies' => env('REMOTE_DB_TRUSTED_PROXIES'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Session Storage Driver
+    |--------------------------------------------------------------------------
+    |
+    | The session driver for storing transaction state. Available drivers:
+    | - "file": File-based sessions in temp directory (default, simple but not recommended for production)
+    | - "redis": Redis-based sessions (recommended for production)
+    | - "database": Database-based sessions using Laravel's default connection
+    | - "cache": Use Laravel's cache system
+    |
+    */
+
+    'session_driver' => env('REMOTE_DB_SESSION_DRIVER', 'file'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Session Lifetime (in seconds)
+    |--------------------------------------------------------------------------
+    |
+    | How long to keep session data before it expires. This affects transaction
+    | state persistence. Default is 1 hour (3600 seconds).
+    |
+    */
+
+    'session_lifetime' => env('REMOTE_DB_SESSION_LIFETIME', 3600),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Redis Session Configuration
+    |--------------------------------------------------------------------------
+    |
+    | When using 'redis' session driver, specify the Redis connection to use.
+    | This should match a connection defined in your config/database.php redis section.
+    |
+    */
+
+    'session_redis_connection' => env('REMOTE_DB_SESSION_REDIS_CONNECTION', 'default'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Database Session Table
+    |--------------------------------------------------------------------------
+    |
+    | When using 'database' session driver, specify the table name for storing
+    | session data. You'll need to create this table with the following schema:
+    |
+    | CREATE TABLE remote_db_sessions (
+    |     id VARCHAR(64) PRIMARY KEY,
+    |     data TEXT,
+    |     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    |     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    | );
+    |
+    */
+
+    'session_table' => env('REMOTE_DB_SESSION_TABLE', 'remote_db_sessions'),
 ];

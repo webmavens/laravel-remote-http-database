@@ -69,6 +69,13 @@ class RemoteHttpConnection extends Connection
     protected $cacheTtl = 60;
 
     /**
+     * Maximum number of cached queries.
+     *
+     * @var int
+     */
+    protected $cacheMaxSize = 1000;
+
+    /**
      * Create a new remote HTTP connection instance.
      *
      * @param  \PDO|\Closure  $pdo
