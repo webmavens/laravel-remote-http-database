@@ -10,12 +10,41 @@ use PDOStatement;
 class RemoteHttpConnector implements ConnectorInterface
 {
     /**
+     * Normalize the encryption key.
+     *
+     * Handles both base64-encoded and raw 32-byte keys for consistency.
+     * This ensures the client and server can use the same key format.
+     *
+     * @param  string  $key
+     * @return string
+     */
+    protected function normalizeEncryptionKey(string $key): string
+    {
+        // If already 32 bytes, use as-is (raw key)
+        if (strlen($key) === 32) {
+            return $key;
+        }
+
+        // Try to decode as base64
+        $decoded = base64_decode($key, true);
+
+        // If decoding succeeded and result is 32 bytes, use decoded value
+        if ($decoded !== false && strlen($decoded) === 32) {
+            return $decoded;
+        }
+
+        // Return original - validation will fail with helpful message
+        return $key;
+    }
+
+    /**
      * Establish a database connection.
      *
      * Since we're using HTTP instead of PDO, we return a mock PDO object
      * that won't actually be used. The RemoteHttpConnection will handle
      * all database operations via HTTP.
      *
+     * @param  array  $config
      * @return \PDO
      *
      * @throws \InvalidArgumentException
@@ -35,8 +64,11 @@ class RemoteHttpConnector implements ConnectorInterface
             throw new InvalidArgumentException('Encryption key is required for remote HTTP connection.');
         }
 
+        // Normalize the encryption key (handles both base64-encoded and raw keys)
+        $config['encryption_key'] = $this->normalizeEncryptionKey($config['encryption_key']);
+
         if (strlen($config['encryption_key']) !== 32) {
-            throw new InvalidArgumentException('Encryption key must be exactly 32 bytes for AES-256.');
+            throw new InvalidArgumentException('Encryption key must be exactly 32 bytes for AES-256. Provide either a raw 32-byte key or a base64-encoded 32-byte key.');
         }
 
         // Return a mock PDO object that won't be used

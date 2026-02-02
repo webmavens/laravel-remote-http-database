@@ -88,8 +88,11 @@ class RemoteHttpConnection extends Connection
     {
         parent::__construct($pdo, $database, $tablePrefix, $config);
 
+        // Normalize the encryption key (handles both base64-encoded and raw keys)
+        $encryptionKey = $this->normalizeEncryptionKey($config['encryption_key']);
+
         // Initialize HTTP client
-        $encryption = new RemoteHttpEncryption($config['encryption_key']);
+        $encryption = new RemoteHttpEncryption($encryptionKey);
         $this->httpClient = new RemoteHttpClient(
             $config['endpoint'],
             $config['api_key'],
@@ -101,12 +104,13 @@ class RemoteHttpConnection extends Connection
             ]
         );
 
-        // Enable batching if configured
-        $this->batchingEnabled = $config['enable_batching'] ?? env('DB_REMOTE_ENABLE_BATCHING', true);
-        
-        // Enable caching if configured
-        $this->cachingEnabled = $config['enable_caching'] ?? env('DB_REMOTE_ENABLE_CACHING', true);
-        $this->cacheTtl = $config['cache_ttl'] ?? env('DB_REMOTE_CACHE_TTL', 60);
+        // Enable batching if configured (avoid env() for cached config compatibility)
+        $this->batchingEnabled = $config['enable_batching'] ?? true;
+
+        // Enable caching if configured (avoid env() for cached config compatibility)
+        $this->cachingEnabled = $config['enable_caching'] ?? true;
+        $this->cacheTtl = $config['cache_ttl'] ?? 60;
+        $this->cacheMaxSize = $config['cache_max_size'] ?? 1000;
     }
 
     /**
@@ -220,15 +224,16 @@ class RemoteHttpConnection extends Connection
             // Cache the results
             if ($this->cachingEnabled) {
                 $cacheKey = $this->getCacheKey($query, $bindings);
+
+                // Enforce cache size limit BEFORE adding new entry
+                if (count(self::$queryCache) >= $this->cacheMaxSize) {
+                    $this->evictCacheEntries();
+                }
+
                 self::$queryCache[$cacheKey] = [
                     'results' => $results,
                     'expires_at' => time() + $this->cacheTtl,
                 ];
-                
-                // Limit cache size to prevent memory issues
-                if (count(self::$queryCache) > 1000) {
-                    $this->cleanExpiredCache();
-                }
             }
             
             $fetchMode = $this->fetchMode;
@@ -405,17 +410,20 @@ class RemoteHttpConnection extends Connection
      *
      * @return void
      */
-    protected function executeBeginTransactionStatement()
+    protected function executeBeginTransactionStatement(): void
     {
-        // Update mock PDO transaction state
-        $pdo = $this->getPdo();
-        if (method_exists($pdo, 'beginTransaction')) {
-            $pdo->beginTransaction();
-        }
+        try {
+            $this->run('BEGIN', [], function ($query, $bindings) {
+                $this->httpClient->sendQuery($this->getName(), $query, $bindings, 'transaction');
+            });
 
-        $this->run('BEGIN', [], function ($query, $bindings) {
-            $this->httpClient->sendQuery($this->getName(), $query, $bindings, 'transaction');
-        });
+            // Update mock PDO transaction state only after successful remote call
+            $this->syncMockPdoTransactionState('begin');
+        } catch (\Exception $e) {
+            // Reset mock PDO state on failure
+            $this->syncMockPdoTransactionState('rollback');
+            throw $e;
+        }
     }
 
     /**
@@ -423,17 +431,20 @@ class RemoteHttpConnection extends Connection
      *
      * @return void
      */
-    public function commit()
+    public function commit(): void
     {
         if ($this->transactionLevel() == 1) {
-            $this->run('COMMIT', [], function ($query, $bindings) {
-                $this->httpClient->sendQuery($this->getName(), $query, $bindings, 'transaction');
-            });
+            try {
+                $this->run('COMMIT', [], function ($query, $bindings) {
+                    $this->httpClient->sendQuery($this->getName(), $query, $bindings, 'transaction');
+                });
 
-            // Update mock PDO transaction state
-            $pdo = $this->getPdo();
-            if (method_exists($pdo, 'commit')) {
-                $pdo->commit();
+                // Update mock PDO transaction state only after successful remote call
+                $this->syncMockPdoTransactionState('commit');
+            } catch (\Exception $e) {
+                // On commit failure, the transaction may or may not have been committed
+                // on the remote side. Log and rethrow - caller should handle appropriately.
+                throw $e;
             }
         }
 
@@ -446,21 +457,57 @@ class RemoteHttpConnection extends Connection
      * @param  int|null  $toLevel
      * @return void
      */
-    public function rollBack($toLevel = null)
+    public function rollBack($toLevel = null): void
     {
         if ($this->transactionLevel() == 1) {
-            $this->run('ROLLBACK', [], function ($query, $bindings) {
-                $this->httpClient->sendQuery($this->getName(), $query, $bindings, 'transaction');
-            });
-
-            // Update mock PDO transaction state
-            $pdo = $this->getPdo();
-            if (method_exists($pdo, 'rollBack')) {
-                $pdo->rollBack();
+            try {
+                $this->run('ROLLBACK', [], function ($query, $bindings) {
+                    $this->httpClient->sendQuery($this->getName(), $query, $bindings, 'transaction');
+                });
+            } catch (\Exception $e) {
+                // Rollback failures are often due to no active transaction on remote
+                // This is acceptable - the transaction is effectively rolled back
+                if (stripos($e->getMessage(), 'no active transaction') === false) {
+                    throw $e;
+                }
             }
+
+            // Always update mock PDO state after rollback attempt
+            $this->syncMockPdoTransactionState('rollback');
         }
 
         parent::rollBack($toLevel);
+    }
+
+    /**
+     * Synchronize the mock PDO transaction state.
+     *
+     * @param  string  $action  One of: 'begin', 'commit', 'rollback'
+     * @return void
+     */
+    protected function syncMockPdoTransactionState(string $action): void
+    {
+        $pdo = $this->getPdo();
+
+        switch ($action) {
+            case 'begin':
+                if (method_exists($pdo, 'beginTransaction') && ! $pdo->inTransaction()) {
+                    $pdo->beginTransaction();
+                }
+                break;
+
+            case 'commit':
+                if (method_exists($pdo, 'commit') && $pdo->inTransaction()) {
+                    $pdo->commit();
+                }
+                break;
+
+            case 'rollback':
+                if (method_exists($pdo, 'rollBack') && $pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                break;
+        }
     }
 
     /**
@@ -607,13 +654,44 @@ class RemoteHttpConnection extends Connection
      *
      * @return void
      */
-    protected function cleanExpiredCache()
+    protected function cleanExpiredCache(): void
     {
         $now = time();
         foreach (self::$queryCache as $key => $cached) {
             if ($cached['expires_at'] <= $now) {
                 unset(self::$queryCache[$key]);
             }
+        }
+    }
+
+    /**
+     * Evict cache entries to make room for new ones.
+     *
+     * First removes expired entries, then removes oldest entries
+     * until cache is at 75% capacity.
+     *
+     * @return void
+     */
+    protected function evictCacheEntries(): void
+    {
+        // First, clean expired entries
+        $this->cleanExpiredCache();
+
+        // If still over limit, remove oldest entries until at 75% capacity
+        $targetSize = (int) ($this->cacheMaxSize * 0.75);
+
+        if (count(self::$queryCache) <= $targetSize) {
+            return;
+        }
+
+        // Sort by expiration time (oldest first)
+        uasort(self::$queryCache, function ($a, $b) {
+            return $a['expires_at'] <=> $b['expires_at'];
+        });
+
+        // Remove oldest entries until at target size
+        while (count(self::$queryCache) > $targetSize) {
+            array_shift(self::$queryCache);
         }
     }
 
@@ -639,10 +717,38 @@ class RemoteHttpConnection extends Connection
      *
      * @return void
      */
-    public function flushBatch()
+    public function flushBatch(): void
     {
         if (! empty($this->queryBatch)) {
             $this->executeBatch();
         }
+    }
+
+    /**
+     * Normalize the encryption key.
+     *
+     * Handles both base64-encoded and raw 32-byte keys for consistency.
+     * This ensures the client and server can use the same key format.
+     *
+     * @param  string  $key
+     * @return string
+     */
+    protected function normalizeEncryptionKey(string $key): string
+    {
+        // If already 32 bytes, use as-is (raw key)
+        if (strlen($key) === 32) {
+            return $key;
+        }
+
+        // Try to decode as base64
+        $decoded = base64_decode($key, true);
+
+        // If decoding succeeded and result is 32 bytes, use decoded value
+        if ($decoded !== false && strlen($decoded) === 32) {
+            return $decoded;
+        }
+
+        // Return original - encryption class will throw appropriate error
+        return $key;
     }
 }

@@ -51,12 +51,63 @@ class RemoteHttpDatabaseServiceProvider extends ServiceProvider
         );
 
         // Register the endpoint route if endpoint configuration is provided
-        $endpointApiKey = config('remote-http-database.endpoint_api_key') ?? env('REMOTE_DB_API_KEY');
+        // Avoid using env() directly for cached config compatibility
+        $endpointApiKey = config('remote-http-database.endpoint_api_key');
         $endpointPath = config('remote-http-database.endpoint_path', '/remote-db-endpoint');
 
         if (! empty($endpointApiKey)) {
-            Route::match(['GET', 'POST'], $endpointPath, RemoteDatabaseEndpointController::class)
-                ->name('remote-db-endpoint');
+            $this->registerEndpointRoute($endpointPath);
         }
+    }
+
+    /**
+     * Register the endpoint route with appropriate middleware.
+     *
+     * @param  string  $path
+     * @return void
+     */
+    protected function registerEndpointRoute(string $path): void
+    {
+        // Get configured middleware or use sensible defaults
+        $middleware = config('remote-http-database.endpoint_middleware', []);
+
+        // If no middleware configured, use API-appropriate defaults
+        if (empty($middleware)) {
+            $middleware = $this->getDefaultMiddleware();
+        }
+
+        Route::match(['GET', 'POST'], $path, RemoteDatabaseEndpointController::class)
+            ->middleware($middleware)
+            ->name('remote-db-endpoint');
+    }
+
+    /**
+     * Get default middleware for the endpoint.
+     *
+     * Uses 'api' middleware group if available, otherwise applies
+     * throttle middleware directly to prevent brute-force attacks.
+     *
+     * @return array
+     */
+    protected function getDefaultMiddleware(): array
+    {
+        // Check if 'api' middleware group exists (Laravel 8+)
+        $router = $this->app->make('router');
+        $middlewareGroups = $router->getMiddlewareGroups();
+
+        if (isset($middlewareGroups['api'])) {
+            return ['api'];
+        }
+
+        // Fallback: apply throttle directly if available
+        $routeMiddleware = $router->getMiddleware();
+
+        if (isset($routeMiddleware['throttle'])) {
+            // Apply rate limiting: 60 requests per minute
+            return ['throttle:60,1'];
+        }
+
+        // No middleware available - endpoint will work but without rate limiting
+        return [];
     }
 }

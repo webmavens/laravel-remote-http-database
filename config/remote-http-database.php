@@ -41,6 +41,8 @@ return [
 
     'cache_ttl' => env('DB_REMOTE_CACHE_TTL', 60),
 
+    'cache_max_size' => env('DB_REMOTE_CACHE_MAX_SIZE', 1000),
+
     /*
     |--------------------------------------------------------------------------
     | Endpoint Configuration (Server 1 - Has MySQL)
@@ -56,6 +58,25 @@ return [
     'endpoint_encryption_key' => env('REMOTE_DB_ENCRYPTION_KEY'),
 
     'endpoint_path' => env('REMOTE_DB_ENDPOINT_PATH', '/remote-db-endpoint'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Endpoint Middleware
+    |--------------------------------------------------------------------------
+    |
+    | Middleware to apply to the remote database endpoint. By default, uses the
+    | 'api' middleware group if available, or applies throttle middleware directly.
+    |
+    | Set to an empty array [] to disable all middleware (not recommended).
+    | Set to ['api'] to use the API middleware group.
+    | Set to ['throttle:60,1'] to apply rate limiting directly.
+    |
+    | Example with custom middleware:
+    | 'endpoint_middleware' => ['throttle:120,1', 'custom-auth'],
+    |
+    */
+
+    'endpoint_middleware' => null, // null = use defaults, [] = no middleware
 
     /*
     |--------------------------------------------------------------------------
